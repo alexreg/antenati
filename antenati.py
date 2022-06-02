@@ -23,8 +23,9 @@ from slugify import slugify
 from humanize import naturalsize
 from tqdm import tqdm
 
+
 class AntenatiDownloader:
-    """Downloader class"""
+    """Downloader for Portale Antenati"""
 
     def __init__(self, archive_url):
         self.archive_url = archive_url
@@ -34,6 +35,8 @@ class AntenatiDownloader:
         self.dirname = self.__generate_dirname()
         self.gallery_length = len(self.canvases)
         self.gallery_size = 0
+        self.active_executors = []
+        self.active_progress_bars = []
 
     @staticmethod
     def __http_headers():
@@ -162,11 +165,15 @@ class AntenatiDownloader:
         return tqdm(total=total, unit='img')
 
     def run(self, n_workers, n_connections):
-        """Main function spanning run function in a thread pool"""
+        """Download images using a thread pool"""
         with self.__executor(n_workers) as executor, self.__pool(n_connections) as pool:
+            self.active_executors.append(executor)
             future_img = { executor.submit(self.__thread_main, pool, i): i for i in self.canvases }
             with self.__progress(self.gallery_length) as progress:
+                self.active_progress_bars.append(progress)
                 for future in as_completed(future_img):
+                    if future.cancelled():
+                        continue
                     progress.update()
                     canvas = future_img[future]
                     label = canvas['label']
@@ -176,19 +183,37 @@ class AntenatiDownloader:
                         progress.write(f'{label} error ({exc})')
                     else:
                         self.gallery_size += size
+                self.active_progress_bars.remove(progress)
+            self.active_executors.remove(executor)
+
+    def cancel(self):
+        for progress_bar in self.active_progress_bars:
+            progress_bar.disable = True
+        for executor in self.active_executors:
+            executor.shutdown(cancel_futures=True)
 
     def print_summary(self):
         """Print summary"""
         print(f'Done. Total size: {naturalsize(self.gallery_size)}')
 
+
 def main():
-    """Main"""
+    from signal import signal, SIGINT
+
+    def signal_handler(signum, frame):
+        print(f'Canceling...')
+        if downloader is not None:
+            downloader.cancel()
+        exit(1)
+
+    downloader = None
+    signal(SIGINT, signal_handler)
 
     # Parse arguments
     parser = ArgumentParser(
         description=__doc__,
         epilog=__copyright__,
-        formatter_class=ArgumentDefaultsHelpFormatter
+        formatter_class=ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument('url', metavar='URL', type=str, help='url of the gallery page')
     parser.add_argument('-n', '--nthreads', type=int, help='max n. of threads', default=8)
@@ -210,6 +235,7 @@ def main():
 
     # Print summary
     downloader.print_summary()
+
 
 if __name__ == '__main__':
     main()
