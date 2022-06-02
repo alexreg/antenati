@@ -152,12 +152,13 @@ class AntenatiDownloader:
             click.echo(f'{label:<25}{value}')
         click.echo(f'{self.gallery_length} images found.')
 
-    def check_dir(self):
+    def check_dir(self, force=False):
         """Check if directory already exists and chdir to it"""
         click.echo(f'Output directory: {self.dirname}')
         if path.exists(self.dirname):
-            click.echo(f'Directory {self.dirname} already exists.')
-            click.confirm('Do you want to proceed?', abort=True)
+            if not force:
+                click.echo(f'Directory {self.dirname} already exists.')
+                click.confirm('Do you want to proceed?', abort=True)
         else:
             mkdir(self.dirname)
         chdir(self.dirname)
@@ -242,12 +243,13 @@ def parse_pages(pages):
 
 
 @cloup.command(help=__doc__, epilog=__copyright__, context_settings=context_settings)
+@cloup.option('--force', '-f', is_flag=True, help='Do not prompt if download directory already exists.')
 @cloup.option('--nthreads', '-n', type=int, default=cpu_count(), help='Maximum number of threads to use.')
 @cloup.option('--nconns', '-c', type=int, default=4, help='Maximum number of connections to use.')
 @cloup.version_option(__version__, '--version', '-v', message="%(prog)s v%(version)s")
 @cloup.argument('url', type=str, help='URL of the gallery web page.')
-@cloup.argument('pages', type=PAGE_LIST, default=None, help='Gallery pages to download.')
-def main(nthreads, nconns, url, pages):
+@cloup.argument('pages', type=PAGE_LIST, required=False, help='Gallery pages to download.')
+def main(force, nthreads, nconns, url, pages):
     from signal import signal, SIGINT
 
     downloader = None
@@ -265,14 +267,17 @@ def main(nthreads, nconns, url, pages):
 
     downloader.print_gallery_info()
 
-    # Check that gallery page numbers are in range.
-    for p in pages:
-        if p < 0 or p >= len(downloader.canvases):
-            click.echo(f'Error: Gallery page {p} is out of range.', file=sys.stderr)
-            return
+    if pages is not None:
+        # Check that gallery page numbers are in range.
+        for p in pages:
+            if p < 0 or p >= len(downloader.canvases):
+                click.echo(f'Error: Gallery page {p} is out of range.', file=sys.stderr)
+                return
 
-    downloader.check_dir()
-    downloader.run(set(pages), nthreads, nconns)
+        pages = set(pages)
+
+    downloader.check_dir(force)
+    downloader.run(pages, nthreads, nconns)
     downloader.print_summary()
 
 
