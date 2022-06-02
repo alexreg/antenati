@@ -9,25 +9,55 @@ __license__     = 'MIT License'
 __version__     = '2.3'
 
 import cgi
+import json
+import mimetypes
+import re
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from os import chdir, cpu_count, mkdir, path
+from random import randint
+
+import certifi
 import click
 import cloup
-import certifi
-import json
-import re
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from mimetypes import guess_extension
-from os import path, mkdir, chdir, cpu_count
-from random import randint
-from urllib3 import PoolManager, HTTPSConnectionPool, HTTPResponse, make_headers
-from slugify import slugify
 from humanize import naturalsize
+from slugify import slugify
 from tqdm import tqdm
+from urllib3 import HTTPResponse, HTTPSConnectionPool, PoolManager, make_headers
+
 
 context_settings = cloup.Context.settings(
     help_option_names=['--help', '-h'],
     show_default=True,
 )
+
+
+class PageListParamType(click.ParamType):
+    name = "page list"
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, list):
+            return value
+
+        def parse_int(value):
+            try:
+                return int(value)
+            except ValueError:
+                self.fail(f'{value!r} is not a valid integer', param, ctx)
+
+        pages = []
+
+        for part in value.split(","):
+            index_range = [parse_int(p) for p in part.split("-", 1)]
+            if len(index_range) == 2:
+                pages.extend(range(index_range[0], index_range[1] + 1))
+            else:
+                pages.append(index_range[0])
+
+        return pages
+
+
+PAGE_LIST = PageListParamType()
 
 
 class AntenatiDownloader:
@@ -46,7 +76,7 @@ class AntenatiDownloader:
 
     @staticmethod
     def __http_headers():
-        """Generate HTTP headers to improve speed and to behave as a browser"""
+        """Generate HTTP headers to improve speed and to behave like a browser"""
         # Default headers to reduce data transfers
         headers = make_headers(
             keep_alive=True,
@@ -66,7 +96,7 @@ class AntenatiDownloader:
 
     @staticmethod
     def __get_archive_id(url):
-        """Get numeric archive ID from the URL"""
+        """Get numeric archive ID from URL"""
         archive_id_pattern = re.search(r'(\d+)', url)
         if not archive_id_pattern:
             raise RuntimeError(f'Cannot get archive ID from {url}')
@@ -74,7 +104,7 @@ class AntenatiDownloader:
 
     @staticmethod
     def __get_iiif_manifest(url):
-        """Get IIIF manifest as JSON from Portale Antenati gallery page"""
+        """Get IIIF manifest as JSON from gallery web page URL"""
         pool = PoolManager(
             headers=AntenatiDownloader.__http_headers(),
             cert_reqs='CERT_REQUIRED',
@@ -119,12 +149,12 @@ class AntenatiDownloader:
         for i in self.manifest['metadata']:
             label = i['label']
             value = i['value']
-            print(f'{label:<25}{value}')
-        print(f'{self.gallery_length} images found.')
+            click.echo(f'{label:<25}{value}')
+        click.echo(f'{self.gallery_length} images found.')
 
     def check_dir(self):
         """Check if directory already exists and chdir to it"""
-        print(f'Output directory: {self.dirname}')
+        click.echo(f'Output directory: {self.dirname}')
         if path.exists(self.dirname):
             click.echo(f'Directory {self.dirname} already exists.')
             click.confirm('Do you want to proceed?', abort=True)
@@ -141,7 +171,7 @@ class AntenatiDownloader:
         if http_reply.status != 200:
             raise RuntimeError(f'{url}: HTTP error {http_reply.status}')
         content_type = cgi.parse_header(http_reply.headers['Content-Type'])
-        extension = guess_extension(content_type[0])
+        extension = mimetypes.guess_extension(content_type[0])
         if not extension:
             raise RuntimeError(f'{url}: Unable to guess extension "{content_type[0]}"')
         label = slugify(canvas['label'])
@@ -170,13 +200,16 @@ class AntenatiDownloader:
     def __progress(total):
         return tqdm(total=total, unit='img')
 
-    def run(self, n_workers, n_connections):
+    def run(self, pages, n_workers, n_connections):
         """Download images using a thread pool"""
         with self.__executor(n_workers) as executor, self.__pool(n_connections) as pool:
             self.active_executors.append(executor)
-            print("FOO", self.canvases)
-            future_img = { executor.submit(self.__thread_main, pool, i): i for i in self.canvases }
-            with self.__progress(self.gallery_length) as progress:
+            if pages is not None:
+                canvases = [self.canvases[p - 1] for p in pages]
+            else:
+                canvases = self.canvases
+            future_img = { executor.submit(self.__thread_main, pool, i): i for i in canvases }
+            with self.__progress(len(canvases)) as progress:
                 self.active_progress_bars.append(progress)
                 for future in as_completed(future_img):
                     if future.cancelled():
@@ -201,29 +234,45 @@ class AntenatiDownloader:
 
     def print_summary(self):
         """Print summary"""
-        print(f'Done. Total size: {naturalsize(self.gallery_size)}')
+        click.echo(f'Done. Total size: {naturalsize(self.gallery_size)}')
+
+
+def parse_pages(pages):
+    pass
 
 
 @cloup.command(help=__doc__, epilog=__copyright__, context_settings=context_settings)
 @cloup.option('--nthreads', '-n', type=int, default=cpu_count(), help='Maximum number of threads to use.')
 @cloup.option('--nconns', '-c', type=int, default=4, help='Maximum number of connections to use.')
 @cloup.version_option(__version__, '--version', '-v', message="%(prog)s v%(version)s")
-@cloup.argument('url', type=str, help='URL of the gallery page.')
-def main(nthreads, nconns, url):
+@cloup.argument('url', type=str, help='URL of the gallery web page.')
+@cloup.argument('pages', type=PAGE_LIST, default=None, help='Gallery pages to download.')
+def main(nthreads, nconns, url, pages):
     from signal import signal, SIGINT
 
+    downloader = None
+
     def signal_handler(signum, frame):
-        print()
-        print(f'Canceling...')
-        downloader.cancel()
+        click.echo()
+        click.echo(f'Canceling...')
+        if downloader is not None:
+            downloader.cancel()
         exit(1)
 
-    downloader = AntenatiDownloader(url)
     signal(SIGINT, signal_handler)
 
+    downloader = AntenatiDownloader(url)
+
     downloader.print_gallery_info()
+
+    # Check that gallery page numbers are in range.
+    for p in pages:
+        if p < 0 or p >= len(downloader.canvases):
+            click.echo(f'Error: Gallery page {p} is out of range.', file=sys.stderr)
+            return
+
     downloader.check_dir()
-    downloader.run(nthreads, nconns)
+    downloader.run(set(pages), nthreads, nconns)
     downloader.print_summary()
 
 
