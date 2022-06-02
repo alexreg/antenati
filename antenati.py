@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-antenati.py: a tool to download data from the Portale Antenati
+antenati.py: a tool for downloading images from Portale Antenati
 """
 
 __author__      = 'Giovanni Cerretani'
@@ -8,20 +8,26 @@ __copyright__   = 'Copyright (c) 2022, Giovanni Cerretani'
 __license__     = 'MIT License'
 __version__     = '2.3'
 
-from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+import cgi
+import click
+import cloup
+import certifi
+import json
+import re
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from cgi import parse_header
-from json import loads
 from mimetypes import guess_extension
-from os import path, mkdir, chdir
+from os import path, mkdir, chdir, cpu_count
 from random import randint
-from re import search
-from certifi import where
 from urllib3 import PoolManager, HTTPSConnectionPool, HTTPResponse, make_headers
-from click import echo, confirm
 from slugify import slugify
 from humanize import naturalsize
 from tqdm import tqdm
+
+context_settings = cloup.Context.settings(
+    help_option_names=['--help', '-h'],
+    show_default=True,
+)
 
 
 class AntenatiDownloader:
@@ -61,7 +67,7 @@ class AntenatiDownloader:
     @staticmethod
     def __get_archive_id(url):
         """Get numeric archive ID from the URL"""
-        archive_id_pattern = search(r'(\d+)', url)
+        archive_id_pattern = re.search(r'(\d+)', url)
         if not archive_id_pattern:
             raise RuntimeError(f'Cannot get archive ID from {url}')
         return archive_id_pattern.group(1)
@@ -72,18 +78,18 @@ class AntenatiDownloader:
         pool = PoolManager(
             headers=AntenatiDownloader.__http_headers(),
             cert_reqs='CERT_REQUIRED',
-            ca_certs=where()
+            ca_certs=certifi.where()
         )
         http_reply = pool.request('GET', url)
         assert isinstance(http_reply, HTTPResponse)
         if http_reply.status != 200:
             raise RuntimeError(f'{url}: HTTP error {http_reply.status}')
-        content_type = parse_header(http_reply.headers['Content-Type'])
+        content_type = cgi.parse_header(http_reply.headers['Content-Type'])
         html_content = http_reply.data.decode(content_type[1]['charset']).split('\n')
         manifest_line = next((l for l in html_content if 'manifestId' in l), None)
         if not manifest_line:
             raise RuntimeError(f'No IIIF manifest found at {url}')
-        manifest_url_pattern = search(r'\'([A-Za-z0-9.:/-]*)\'', manifest_line)
+        manifest_url_pattern = re.search(r'\'([A-Za-z0-9.:/-]*)\'', manifest_line)
         if not manifest_url_pattern:
             raise RuntimeError(f'Invalid IIIF manifest line found at {url}')
         manifest_url = manifest_url_pattern.group(1)
@@ -91,8 +97,8 @@ class AntenatiDownloader:
         assert isinstance(http_reply, HTTPResponse)
         if http_reply.status != 200:
             raise RuntimeError(f'{url}: HTTP error {http_reply.status}')
-        content_type = parse_header(http_reply.headers['Content-Type'])
-        return loads(http_reply.data.decode(content_type[1]['charset']))
+        content_type = cgi.parse_header(http_reply.headers['Content-Type'])
+        return json.loads(http_reply.data.decode(content_type[1]['charset']))
 
     def __get_metadata_content(self, label):
         """Get metadata content of IIIF manifest given its label"""
@@ -120,8 +126,8 @@ class AntenatiDownloader:
         """Check if directory already exists and chdir to it"""
         print(f'Output directory: {self.dirname}')
         if path.exists(self.dirname):
-            echo(f'Directory {self.dirname} already exists.')
-            confirm('Do you want to proceed?', abort=True)
+            click.echo(f'Directory {self.dirname} already exists.')
+            click.confirm('Do you want to proceed?', abort=True)
         else:
             mkdir(self.dirname)
         chdir(self.dirname)
@@ -134,7 +140,7 @@ class AntenatiDownloader:
         assert isinstance(http_reply, HTTPResponse)
         if http_reply.status != 200:
             raise RuntimeError(f'{url}: HTTP error {http_reply.status}')
-        content_type = parse_header(http_reply.headers['Content-Type'])
+        content_type = cgi.parse_header(http_reply.headers['Content-Type'])
         extension = guess_extension(content_type[0])
         if not extension:
             raise RuntimeError(f'{url}: Unable to guess extension "{content_type[0]}"')
@@ -157,7 +163,7 @@ class AntenatiDownloader:
             block=True,
             headers=AntenatiDownloader.__http_headers(),
             cert_reqs='CERT_REQUIRED',
-            ca_certs=where()
+            ca_certs=certifi.where()
         )
 
     @staticmethod
@@ -168,6 +174,7 @@ class AntenatiDownloader:
         """Download images using a thread pool"""
         with self.__executor(n_workers) as executor, self.__pool(n_connections) as pool:
             self.active_executors.append(executor)
+            print("FOO", self.canvases)
             future_img = { executor.submit(self.__thread_main, pool, i): i for i in self.canvases }
             with self.__progress(self.gallery_length) as progress:
                 self.active_progress_bars.append(progress)
@@ -197,43 +204,26 @@ class AntenatiDownloader:
         print(f'Done. Total size: {naturalsize(self.gallery_size)}')
 
 
-def main():
+@cloup.command(help=__doc__, epilog=__copyright__, context_settings=context_settings)
+@cloup.option('--nthreads', '-n', type=int, default=cpu_count(), help='Maximum number of threads to use.')
+@cloup.option('--nconns', '-c', type=int, default=4, help='Maximum number of connections to use.')
+@cloup.version_option(__version__, '--version', '-v', message="%(prog)s v%(version)s")
+@cloup.argument('url', type=str, help='URL of the gallery page.')
+def main(nthreads, nconns, url):
     from signal import signal, SIGINT
 
     def signal_handler(signum, frame):
+        print()
         print(f'Canceling...')
-        if downloader is not None:
-            downloader.cancel()
+        downloader.cancel()
         exit(1)
 
-    downloader = None
+    downloader = AntenatiDownloader(url)
     signal(SIGINT, signal_handler)
 
-    # Parse arguments
-    parser = ArgumentParser(
-        description=__doc__,
-        epilog=__copyright__,
-        formatter_class=ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument('url', metavar='URL', type=str, help='url of the gallery page')
-    parser.add_argument('-n', '--nthreads', type=int, help='max n. of threads', default=8)
-    parser.add_argument('-c', '--nconn', type=int, help='max n. of connections', default=4)
-    parser.add_argument('-v', '--version', action='version', version=__version__)
-    args = parser.parse_args()
-
-    # Initialize
-    downloader = AntenatiDownloader(args.url)
-
-    # Print gallery info
     downloader.print_gallery_info()
-
-    # Check if directory already exists and chdir to it
     downloader.check_dir()
-
-    # Run
-    downloader.run(args.nthreads, args.nconn)
-
-    # Print summary
+    downloader.run(nthreads, nconns)
     downloader.print_summary()
 
 
