@@ -263,22 +263,24 @@ def main(force, nthreads, nconns, url, pages):
 
     signal(SIGINT, signal_handler)
 
-    downloader = AntenatiDownloader(url)
+    try:
+        downloader = AntenatiDownloader(url)
 
-    downloader.print_gallery_info()
+        downloader.print_gallery_info()
 
-    if pages is not None:
-        # Check that gallery page numbers are in range.
-        for p in pages:
-            if p < 0 or p >= len(downloader.canvases):
-                click.echo(f'Error: Gallery page {p} is out of range.', file=sys.stderr)
-                return
+        if pages is not None:
+            # Check that gallery page numbers are in range.
+            for p in pages:
+                if p < 0 or p >= len(downloader.canvases):
+                    raise RuntimeError(f'Gallery age {p} is out of range')
 
-        pages = set(pages)
+            pages = set(pages)
 
-    downloader.check_dir(force)
-    downloader.run(pages, nthreads, nconns)
-    downloader.print_summary()
+        downloader.check_dir(force)
+        downloader.run(pages, nthreads, nconns)
+        downloader.print_summary()
+    except RuntimeError as exc:
+        click.echo(f'Error: {exc}', file=sys.stderr)
 
 
 if __name__ == '__main__':
