@@ -15,7 +15,6 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from os import chdir, cpu_count, mkdir, path
-from random import randint
 
 import certifi
 import click
@@ -82,14 +81,12 @@ class AntenatiDownloader:
             keep_alive=True,
             accept_encoding=True
         )
-        # Update 05/2022:
         # SAN server return 403 if HTTP headers are not properly set.
         # - User-Agent: not required, but was required in the past
         # - Referer: required
         # - Origin: not required
         # Not required headers are kept, in case new filters are added.
-        ver = f'{randint(80, 97)}.0'
-        headers['User-Agent'] = f'Mozilla/5.0 (Mobile; rv:{ver}) Gecko/{ver} Firefox/{ver}'
+        headers['User-Agent'] = 'Mozilla/5.0 (Mobile; rv:97.0) Gecko/97.0 Firefox/97.0'
         headers['Referer'] = 'https://www.antenati.san.beniculturali.it/'
         headers['Origin'] = 'https://www.antenati.san.beniculturali.it'
         return headers
