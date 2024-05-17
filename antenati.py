@@ -268,8 +268,8 @@ def main(force, nthreads, nconns, url, pages):
         if pages is not None:
             # Check that gallery page numbers are in range.
             for p in pages:
-                if p < 0 or p >= len(downloader.canvases):
-                    raise RuntimeError(f'Gallery age {p} is out of range')
+                if p < 1 or p > len(downloader.canvases):
+                    raise RuntimeError(f'Gallery page {p} is out of range')
 
             pages = set(pages)
 
